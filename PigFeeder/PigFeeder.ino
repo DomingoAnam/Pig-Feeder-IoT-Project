@@ -4,17 +4,23 @@
 #include <WiFiClientSecure.h>
 #include <UniversalTelegramBot.h>
 #include <ArduinoJson.h>
+#include <time.h>
 
 // ================= WIFI =================
 const char* ssid = "Anam's Private WiFi Nga Hinay";
 const char* password = "anamnop@ssword2025";
 
 // ================= TELEGRAM SETUP =================
-#define BOT_TOKEN "8705848716:AAHidKN_5YxfYvsUnG4uiW6QUIT6FEOuXCg"  // Get from @BotFather
-#define CHAT_ID "6121150683"      // Get from @userinfobot
+#define BOT_TOKEN "8705848716:AAHidKN_5YxfYvsUnG4uiW6QUIT6FEOuXCg"
+#define CHAT_ID "6121150683"
 
 WiFiClientSecure secured_client;
 UniversalTelegramBot bot(BOT_TOKEN, secured_client);
+
+// ================= NTP TIME SETUP =================
+const char* ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = 28800; // GMT+8 for Philippines
+const int daylightOffset_sec = 0;
 
 // ================= PINS =================
 #define TRIGGER_PIN D1
@@ -22,14 +28,14 @@ UniversalTelegramBot bot(BOT_TOKEN, secured_client);
 #define SERVO_PIN D3
 
 // ================= SENSOR SETTINGS =================
-const int fullDistance = 5;   // Distance at full (5cm from bottom)
-const int emptyDistance = 30; // Distance at empty (30cm from bottom)
+const int fullDistance = 5;
+const int emptyDistance = 30;
 
 // ================= SERVO SETTINGS =================
 Servo feedServo;
 int servoOpen = 180;
 int servoClosed = 0;
-float gramsPerSecond = 50; // Calibration: grams per second
+float gramsPerSecond = 50;
 
 // ================= FEED SETTINGS =================
 bool dispensing = false;
@@ -41,14 +47,15 @@ unsigned long lastFeedTime = 0;
 // ================= PIG PEN STRUCTURE =================
 struct Pen {
   String name;
-  int pigs;
-  float gramsPerPig;
+  int piglets;
+  float gramsPerPiglet;
   float feedLevel;
   String schedules[3];
+  String lastFedTime[3]; // Track last fed time for each schedule
 };
 
 Pen pens[1] = {
-  {"Pen 1", 0, 100, 100, {"08:00", "12:00", "17:00"}}
+  {"Pen", 0, 100, 100, {"08:00", "12:00", "17:00"}, {"", "", ""}}
 };
 
 // ================= SERVER =================
@@ -62,11 +69,16 @@ void checkSchedules();
 void sendTelegramAlert(String message);
 void handleUI();
 void handleGetData();
-void handleAddPig();
-void handleRemovePig();
-void handleUpdateFeedPerPig();
+void handleAddPiglet();
+void handleRemovePiglet();
+void handleUpdateFeedPerPiglet();
 void handleUpdateSchedule();
 void handleGetSchedule();
+void syncTime();
+String getCurrentTime();
+String getCurrentDate();
+int getCurrentHour();
+int getCurrentMinute();
 
 // ================= SETUP =================
 void setup() {
@@ -78,37 +90,111 @@ void setup() {
   feedServo.attach(SERVO_PIN);
   feedServo.write(servoClosed);
   
-  // Configure secure client for Telegram
   secured_client.setInsecure();
   
   WiFi.begin(ssid, password);
 
-  // Wait for WiFi connection
+  Serial.print("Connecting to WiFi");
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
+    Serial.print(".");
   }
+  Serial.println();
   
-  // Print ONLY the IP address
+  // Print IP Address
+  Serial.print("IP Address: ");
   Serial.println(WiFi.localIP());
+  
+  // Sync time with NTP server
+  syncTime();
 
   server.on("/", handleUI);
   server.on("/getData", handleGetData);
-  server.on("/addPig", handleAddPig);
-  server.on("/removePig", handleRemovePig);
-  server.on("/updateFeedPerPig", handleUpdateFeedPerPig);
+  server.on("/addPiglet", handleAddPiglet);
+  server.on("/removePiglet", handleRemovePiglet);
+  server.on("/updateFeedPerPiglet", handleUpdateFeedPerPiglet);
   server.on("/updateSchedule", handleUpdateSchedule);
   server.on("/getSchedule", handleGetSchedule);
   server.begin();
   
-  // Send startup notification
-  sendTelegramAlert("✅ Smart Pig Feeder is ONLINE!");
+  Serial.println("Web server started!");
+  Serial.println("Open browser and enter: http://" + WiFi.localIP().toString());
+  
+  sendTelegramAlert("✅ Smart Pig Feeder is ONLINE!\nIP Address: " + WiFi.localIP().toString());
+}
+
+// ================= SYNC TIME WITH NTP =================
+void syncTime() {
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+  Serial.print("Syncing time with NTP server");
+  
+  struct tm timeinfo;
+  int attempts = 0;
+  while (!getLocalTime(&timeinfo) && attempts < 10) {
+    delay(1000);
+    Serial.print(".");
+    attempts++;
+  }
+  Serial.println();
+  
+  if (attempts < 10) {
+    char timeBuffer[9];
+    strftime(timeBuffer, sizeof(timeBuffer), "%H:%M:%S", &timeinfo);
+    Serial.print("Time synchronized! Current time: ");
+    Serial.println(timeBuffer);
+  } else {
+    Serial.println("Failed to sync time! Using millis() based time.");
+  }
+}
+
+// ================= GET CURRENT TIME STRING =================
+String getCurrentTime() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    unsigned long seconds = millis() / 1000;
+    int hour = (seconds / 3600) % 24;
+    int minute = (seconds / 60) % 60;
+    char timeStr[6];
+    sprintf(timeStr, "%02d:%02d", hour, minute);
+    return String(timeStr);
+  }
+  char timeStr[6];
+  strftime(timeStr, sizeof(timeStr), "%H:%M", &timeinfo);
+  return String(timeStr);
+}
+
+String getCurrentDate() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    return String(millis() / 86400000);
+  }
+  char dateStr[11];
+  strftime(dateStr, sizeof(dateStr), "%Y-%m-%d", &timeinfo);
+  return String(dateStr);
+}
+
+int getCurrentHour() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    unsigned long seconds = millis() / 1000;
+    return (seconds / 3600) % 24;
+  }
+  return timeinfo.tm_hour;
+}
+
+int getCurrentMinute() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    unsigned long seconds = millis() / 1000;
+    return (seconds / 60) % 60;
+  }
+  return timeinfo.tm_min;
 }
 
 // ================= LOOP =================
 void loop() {
   server.handleClient();
   
-  // Check and dispense feed based on schedule
   checkSchedules();
   
   // Handle dispensing process
@@ -121,7 +207,8 @@ void loop() {
       dispensing = false;
       lastFeedTime = millis();
       
-      // Send Telegram notification after dispensing
+      Serial.println("Dispensing complete - Servo closed to 0 degrees");
+      
       String msg = "✅ Feeding completed!\n";
       msg += "Dispensed: " + String(targetGrams) + "g\n";
       msg += "Remaining feed: " + String(pens[0].feedLevel, 1) + "%";
@@ -135,7 +222,6 @@ void loop() {
     pens[0].feedLevel = getFeedLevelPercentage();
     lastLevelCheck = millis();
     
-    // Check if feed level is 20% or below
     if (pens[0].feedLevel <= 20) {
       String alertMsg = "⚠️ LOW FEED ALERT!\n\n";
       alertMsg += "Feed Level: " + String(pens[0].feedLevel, 1) + "%\n";
@@ -183,6 +269,7 @@ float getFeedLevelPercentage() {
 // ================= SERVO DISPENSING FUNCTIONS =================
 void dispenseFeed(float grams) {
   if (dispensing) {
+    Serial.println("Already dispensing, skipping...");
     return;
   }
   
@@ -191,15 +278,36 @@ void dispenseFeed(float grams) {
     return;
   }
   
-  targetGrams = grams;
+  if (pens[0].piglets <= 0) {
+    sendTelegramAlert("❌ Cannot dispense - No piglets added!");
+    return;
+  }
   
-  // Send Telegram notification before dispensing
-  String msg = "🍽️ Scheduled feeding started!\n";
-  msg += "Amount: " + String(grams) + "g";
-  sendTelegramAlert(msg);
+  targetGrams = grams;
+  float dispenseSeconds = grams / gramsPerSecond;
+  
+  Serial.println("========================================");
+  Serial.println("SCHEDULED FEEDING STARTING");
+  Serial.print("Current time: ");
+  Serial.println(getCurrentTime());
+  Serial.print("Target grams: ");
+  Serial.print(grams);
+  Serial.println("g");
+  Serial.print("Dispensing for: ");
+  Serial.print(dispenseSeconds);
+  Serial.println(" seconds");
+  Serial.println("Opening servo to 180 degrees...");
   
   feedServo.write(servoOpen);
   delay(500);
+  
+  Serial.println("Servo is OPEN at 180 degrees - Dispensing feed");
+  
+  String msg = "🍽️ Scheduled feeding started!\n";
+  msg += "Time: " + getCurrentTime() + "\n";
+  msg += "Amount: " + String(grams) + "g\n";
+  msg += "Dispensing time: " + String(dispenseSeconds, 1) + " seconds";
+  sendTelegramAlert(msg);
   
   dispensing = true;
   dispenseStartTime = millis();
@@ -209,23 +317,20 @@ void dispenseFeed(float grams) {
   float feedReduction = (grams / 1000.0) * 100;
   float newFeedLevel = pens[0].feedLevel - feedReduction;
   pens[0].feedLevel = constrain(newFeedLevel, 0, 100);
+  
+  Serial.print("New feed level: ");
+  Serial.print(pens[0].feedLevel);
+  Serial.println("%");
 }
 
 // ================= TELEGRAM ALERT =================
 void sendTelegramAlert(String message) {
   static unsigned long lastTelegramTime = 0;
   
-  // Rate limiting - don't send more than once per minute
   if (millis() - lastTelegramTime < 60000) {
     return;
   }
   
-  // Check if token is configured
-  if (String(BOT_TOKEN) == "YOUR_BOT_TOKEN_HERE") {
-    return;
-  }
-  
-  // Send the message
   int attempts = 0;
   while (attempts < 3) {
     if (bot.sendMessage(CHAT_ID, message, "")) {
@@ -242,13 +347,25 @@ void sendTelegramAlert(String message) {
 void checkSchedules() {
   static unsigned long lastScheduleCheck = 0;
   static int lastCheckedMinute = -1;
+  static String lastDate = "";
   
-  if (millis() - lastScheduleCheck >= 60000) {
+  // Get current date to reset tracking if needed
+  String currentDate = getCurrentDate();
+  if (currentDate != lastDate) {
+    lastDate = currentDate;
+    // Clear last fed times for new day
+    for (int i = 0; i < 3; i++) {
+      pens[0].lastFedTime[i] = "";
+    }
+    Serial.println("New day - Feed tracking reset");
+  }
+  
+  if (millis() - lastScheduleCheck >= 60000) { // Check every minute
     lastScheduleCheck = millis();
     
-    unsigned long seconds = millis() / 1000;
-    int currentHour = (seconds / 3600) % 24;
-    int currentMinute = (seconds / 60) % 60;
+    int currentHour = getCurrentHour();
+    int currentMinute = getCurrentMinute();
+    int currentTotalMinutes = currentHour * 60 + currentMinute;
     
     if (currentMinute != lastCheckedMinute) {
       lastCheckedMinute = currentMinute;
@@ -256,11 +373,36 @@ void checkSchedules() {
       char currentTimeStr[6];
       sprintf(currentTimeStr, "%02d:%02d", currentHour, currentMinute);
       
+      // Check each schedule time
       for (int i = 0; i < 3; i++) {
-        if (pens[0].schedules[i] == String(currentTimeStr)) {
-          float feedAmount = pens[0].pigs * pens[0].gramsPerPig;
-          if (feedAmount > 0 && pens[0].feedLevel > 0) {
-            dispenseFeed(feedAmount);
+        int scheduleHour = pens[0].schedules[i].substring(0, 2).toInt();
+        int scheduleMinute = pens[0].schedules[i].substring(3, 5).toInt();
+        int scheduleTotalMinutes = scheduleHour * 60 + scheduleMinute;
+        
+        // Check if current time matches schedule
+        if (currentTotalMinutes == scheduleTotalMinutes) {
+          // Check if we haven't fed at this exact minute yet
+          if (pens[0].lastFedTime[i] != getCurrentTime()) {
+            Serial.print("Schedule time matched: ");
+            Serial.println(pens[0].schedules[i]);
+            
+            float feedAmount = pens[0].piglets * pens[0].gramsPerPiglet;
+            
+            if (feedAmount > 0 && pens[0].feedLevel > 0) {
+              Serial.print("Dispensing ");
+              Serial.print(feedAmount);
+              Serial.println("g at scheduled time");
+              dispenseFeed(feedAmount);
+              pens[0].lastFedTime[i] = getCurrentTime(); // Mark this time as fed
+            } else if (feedAmount <= 0) {
+              Serial.println("Cannot dispense - No piglets added!");
+              sendTelegramAlert("⚠️ Cannot dispense: No piglets added to the pen!");
+            } else if (pens[0].feedLevel <= 0) {
+              Serial.println("Cannot dispense - Feed level empty!");
+              sendTelegramAlert("⚠️ Cannot dispense: Feed level is empty! Please refill.");
+            }
+          } else {
+            Serial.println("Already fed at this time, skipping duplicate");
           }
           break;
         }
@@ -284,6 +426,7 @@ body{font-family:Arial,Helvetica,sans-serif}
 .page{display:none}
 .page.active{display:block}
 .loading{text-align:center;padding:20px}
+.time-input{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:10px;color:white;width:120px}
 </style>
 </head>
 
@@ -314,13 +457,14 @@ style="background:conic-gradient(#22c55e 0 72%, #334155 72% 100%);">
 </div>
 
 <div class="bg-slate-900 rounded-2xl p-4 text-center">
-<p class="text-slate-400 text-sm">Total Pigs</p>
-<p id="totalPigs" class="text-3xl font-bold">0</p>
+<p class="text-slate-400 text-sm">Total Piglets</p>
+<p id="totalPiglets" class="text-3xl font-bold">0</p>
 </div>
 
 <div class="bg-slate-900 rounded-2xl p-4">
 <p class="text-slate-400 text-sm mb-2">System Status</p>
 <p id="systemStatus" class="text-green-400">● System Online</p>
+<p id="currentTime" class="text-xs text-slate-500 mt-1">🕐 Current time: --</p>
 <p id="telegramStatus" class="text-xs text-slate-500 mt-1">📱 Telegram Alerts Active</p>
 <p id="nextFeed" class="text-xs text-slate-500 mt-1">⏰ Next feeding: --</p>
 </div>
@@ -346,7 +490,7 @@ style="background:conic-gradient(#22c55e 0 72%, #334155 72% 100%);">
 </div>
 
 <script>
-let pens = [{name:"Pen 1", pigs:0, gramsPerPig:100, schedules:["08:00","12:00","17:00"]}];
+let pens = [{name:"Pen", piglets:0, gramsPerPiglet:100, schedules:["08:00","12:00","17:00"]}];
 
 function showPage(id){
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
@@ -358,89 +502,89 @@ function openPen(){
   const pen = pens[0];
   document.getElementById('penContent').innerHTML = `
     <h2 class="text-xl font-semibold mb-4">${pen.name}</h2>
-    <p class="mb-2">Number of Pigs: <b id="pigCount">${pen.pigs}</b></p>
+    <p class="mb-2">Number of Piglets: <b id="pigletCount">${pen.piglets}</b></p>
     <div class="flex gap-2 mb-4">
-      <button onclick="addPig()" class="flex-1 bg-blue-600 p-3 rounded-xl hover:bg-blue-700 transition">＋ Add Pig</button>
-      <button onclick="removePig()" class="flex-1 bg-red-600 p-3 rounded-xl hover:bg-red-700 transition">－ Remove Pig</button>
+      <button onclick="addPiglet()" class="flex-1 bg-blue-600 p-3 rounded-xl hover:bg-blue-700 transition">＋ Add Piglet</button>
+      <button onclick="removePiglet()" class="flex-1 bg-red-600 p-3 rounded-xl hover:bg-red-700 transition">－ Remove Piglet</button>
     </div>
     <div class="mb-4">
-      <label class="text-sm text-slate-400">Feed per pig (grams)</label>
-      <input type="number" id="feedPerPigInput" value="${pen.gramsPerPig}" 
+      <label class="text-sm text-slate-400">Feed per piglet (grams)</label>
+      <input type="number" id="feedPerPigletInput" value="${pen.gramsPerPiglet}" 
         class="w-full mt-2 p-3 bg-slate-800 rounded-xl" 
-        onchange="updateFeedPerPig(this.value)">
+        onchange="updateFeedPerPiglet(this.value)">
     </div>
     <div class="mb-4">
-      <label class="text-sm text-slate-400">Feeding Schedules</label>
+      <label class="text-sm text-slate-400">Feeding Schedules (24-hour format)</label>
       <div class="mt-2 space-y-2">
-        <div class="bg-slate-800 p-3 rounded-xl">
-          <span>Morning</span>
+        <div class="bg-slate-800 p-3 rounded-xl flex justify-between items-center">
+          <span>🌅 Morning Feeding</span>
           <input type="time" id="schedule0" value="${pen.schedules[0]}" 
-            class="float-right bg-slate-700 p-2 rounded-lg"
-            onchange="updateSchedule(0, this.value)">
+            class="time-input" onchange="updateSchedule(0, this.value)">
         </div>
-        <div class="bg-slate-800 p-3 rounded-xl">
-          <span>Afternoon</span>
+        <div class="bg-slate-800 p-3 rounded-xl flex justify-between items-center">
+          <span>☀️ Afternoon Feeding</span>
           <input type="time" id="schedule1" value="${pen.schedules[1]}" 
-            class="float-right bg-slate-700 p-2 rounded-lg"
-            onchange="updateSchedule(1, this.value)">
+            class="time-input" onchange="updateSchedule(1, this.value)">
         </div>
-        <div class="bg-slate-800 p-3 rounded-xl">
-          <span>Evening</span>
+        <div class="bg-slate-800 p-3 rounded-xl flex justify-between items-center">
+          <span>🌙 Evening Feeding</span>
           <input type="time" id="schedule2" value="${pen.schedules[2]}" 
-            class="float-right bg-slate-700 p-2 rounded-lg"
-            onchange="updateSchedule(2, this.value)">
+            class="time-input" onchange="updateSchedule(2, this.value)">
         </div>
       </div>
     </div>
     <div class="bg-slate-800 rounded-xl p-3 text-sm">
-      <p>Total feed per dispensing: <b id="totalFeed">${pen.pigs * pen.gramsPerPig}g</b></p>
-      <p class="mt-2 text-slate-400">⚠️ Feeder will dispense automatically at scheduled times</p>
+      <p>Total feed per dispensing: <b id="totalFeed">${pen.piglets * pen.gramsPerPiglet}g</b></p>
+      <p class="mt-2 text-yellow-400">⚠️ Feeder will dispense automatically at the scheduled times above</p>
+      <p class="mt-1 text-xs text-slate-400">🔄 Servo opens to 180° during dispensing, closes to 0° when done</p>
+      <p class="mt-1 text-xs text-blue-400">💡 Tip: Set any time you want, the feeder will follow exactly</p>
     </div>
   `;
 }
 
-function addPig(){
-  pens[0].pigs++;
-  updatePigCount();
+function addPiglet(){
+  pens[0].piglets++;
+  updatePigletCount();
   updateTotalFeedDisplay();
-  fetch('/addPig');
+  fetch('/addPiglet');
 }
 
-function removePig(){
-  if(pens[0].pigs > 0) pens[0].pigs--;
-  updatePigCount();
+function removePiglet(){
+  if(pens[0].piglets > 0) pens[0].piglets--;
+  updatePigletCount();
   updateTotalFeedDisplay();
-  fetch('/removePig');
+  fetch('/removePiglet');
 }
 
-function updatePigCount(){
-  const pigCountElem = document.getElementById('pigCount');
-  if(pigCountElem) pigCountElem.textContent = pens[0].pigs;
+function updatePigletCount(){
+  const pigletCountElem = document.getElementById('pigletCount');
+  if(pigletCountElem) pigletCountElem.textContent = pens[0].piglets;
 }
 
 function updateTotalFeedDisplay(){
   const totalFeedElem = document.getElementById('totalFeed');
   if(totalFeedElem){
-    totalFeedElem.textContent = (pens[0].pigs * pens[0].gramsPerPig) + "g";
+    totalFeedElem.textContent = (pens[0].piglets * pens[0].gramsPerPiglet) + "g";
   }
 }
 
-function updateFeedPerPig(value){
-  pens[0].gramsPerPig = parseInt(value);
+function updateFeedPerPiglet(value){
+  pens[0].gramsPerPiglet = parseInt(value);
   updateTotalFeedDisplay();
-  fetch(`/updateFeedPerPig?grams=${value}`);
+  fetch(`/updateFeedPerPiglet?grams=${value}`);
 }
 
 function updateSchedule(index, time){
   pens[0].schedules[index] = time;
   fetch(`/updateSchedule?index=${index}&time=${time}`);
+  setTimeout(updateStats, 500);
 }
 
 function updateStats(){
   fetch('/getData')
     .then(response => response.json())
     .then(data => {
-      document.getElementById("totalPigs").textContent = data.totalPigs;
+      document.getElementById("totalPiglets").textContent = data.totalPiglets;
       document.getElementById("feedConsumed").textContent = data.totalConsumed + "g";
       let level = data.feedLevel;
       document.getElementById("feedLevel").textContent = level + "%";
@@ -454,16 +598,18 @@ function updateStats(){
         document.getElementById("systemStatus").className = "text-green-400";
       }
       
-      // Update next feeding time
       const now = new Date();
-      const currentTime = now.getHours() * 60 + now.getMinutes();
+      const currentTimeStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+      document.getElementById("currentTime").innerHTML = `🕐 Current time: ${currentTimeStr}`;
+      
+      const currentMinutes = now.getHours() * 60 + now.getMinutes();
       let nextTime = null;
       let nextTimeStr = "";
       
       for(let schedule of pens[0].schedules){
         const [hours, minutes] = schedule.split(':');
         const scheduleMinutes = parseInt(hours) * 60 + parseInt(minutes);
-        if(scheduleMinutes > currentTime){
+        if(scheduleMinutes > currentMinutes){
           if(nextTime === null || scheduleMinutes < nextTime){
             nextTime = scheduleMinutes;
             nextTimeStr = schedule;
@@ -479,7 +625,6 @@ function updateStats(){
     });
 }
 
-// Load initial schedule values
 function loadSchedule(){
   fetch('/getSchedule')
     .then(response => response.json())
@@ -508,7 +653,7 @@ loadSchedule();
 void handleGetData() {
   String json = "{";
   json += "\"feedLevel\":" + String(pens[0].feedLevel) + ",";
-  json += "\"totalPigs\":" + String(pens[0].pigs) + ",";
+  json += "\"totalPiglets\":" + String(pens[0].piglets) + ",";
   json += "\"totalConsumed\":" + String(totalFeedConsumed);
   json += "}";
   server.send(200, "application/json", json);
@@ -525,19 +670,19 @@ void handleGetSchedule() {
   server.send(200, "application/json", json);
 }
 
-void handleAddPig() {
-  pens[0].pigs++;
+void handleAddPiglet() {
+  pens[0].piglets++;
   server.send(200, "text/plain", "OK");
 }
 
-void handleRemovePig() {
-  if(pens[0].pigs > 0) pens[0].pigs--;
+void handleRemovePiglet() {
+  if(pens[0].piglets > 0) pens[0].piglets--;
   server.send(200, "text/plain", "OK");
 }
 
-void handleUpdateFeedPerPig() {
+void handleUpdateFeedPerPiglet() {
   if(server.hasArg("grams")) {
-    pens[0].gramsPerPig = server.arg("grams").toFloat();
+    pens[0].gramsPerPiglet = server.arg("grams").toFloat();
   }
   server.send(200, "text/plain", "OK");
 }
@@ -548,6 +693,10 @@ void handleUpdateSchedule() {
     String time = server.arg("time");
     if(index >= 0 && index < 3) {
       pens[0].schedules[index] = time;
+      Serial.print("Schedule ");
+      Serial.print(index);
+      Serial.print(" updated to: ");
+      Serial.println(time);
     }
   }
   server.send(200, "text/plain", "OK");
